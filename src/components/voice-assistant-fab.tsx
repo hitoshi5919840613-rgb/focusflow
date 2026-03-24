@@ -1,5 +1,6 @@
 "use client";
 
+import type { FormEvent } from "react";
 import { useEffect, useRef, useState } from "react";
 import {
   convertVoiceMemoToTask,
@@ -24,6 +25,7 @@ export function VoiceAssistantFab({
   const [isListening, setIsListening] = useState(false);
   const [interimTranscript, setInterimTranscript] = useState("");
   const [latestTranscript, setLatestTranscript] = useState("");
+  const [textDraft, setTextDraft] = useState("");
   const [result, setResult] = useState<VoiceCommandOutcome | null>(null);
   const [recentMemos, setRecentMemos] = useState<VoiceMemoItem[]>([]);
   const [errorMessage, setErrorMessage] = useState<string>();
@@ -47,6 +49,7 @@ export function VoiceAssistantFab({
     }
 
     setLatestTranscript(transcript);
+    setTextDraft("");
     setErrorMessage(undefined);
 
     try {
@@ -62,6 +65,11 @@ export function VoiceAssistantFab({
       const message = error instanceof Error ? error.message : "音声処理に失敗しました。";
       setErrorMessage(message);
     }
+  }
+
+  function handleTextSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    void processTranscript(textDraft.trim());
   }
 
   function startListening() {
@@ -238,6 +246,31 @@ export function VoiceAssistantFab({
             ) : null}
           </div>
 
+          <div className="mt-4 rounded-[22px] border border-slate-200/70 bg-white/55 p-4 dark:border-slate-700/70 dark:bg-slate-950/25">
+            <p className="text-xs font-medium uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
+              Text
+            </p>
+            <p className="mt-2 text-sm leading-6 text-slate-600 dark:text-slate-300">
+              話せない場所では、ここに打ち込んでも同じローカル解析でタスク化やメモ保存ができます。
+            </p>
+
+            <form className="mt-4 space-y-3" onSubmit={handleTextSubmit}>
+              <textarea
+                value={textDraft}
+                onChange={(event) => setTextDraft(event.target.value)}
+                className="soft-input min-h-24 w-full rounded-2xl px-4 py-3 text-sm outline-none"
+                placeholder="例: 明日までに体育のシラバスを作る、仕事、優先度高"
+              />
+              <button
+                type="submit"
+                disabled={!textDraft.trim()}
+                className="w-full rounded-2xl bg-secondary px-4 py-3 text-sm font-semibold text-white transition hover:bg-emerald-600 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                テキストを実行する
+              </button>
+            </form>
+          </div>
+
           {result ? (
             <div className="mt-4 rounded-[22px] border border-slate-200/70 bg-white/55 p-4 dark:border-slate-700/70 dark:bg-slate-950/25">
               <p className="text-xs font-medium uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
@@ -320,9 +353,6 @@ export function VoiceAssistantFab({
         type="button"
         onClick={() => {
           setIsOpen(true);
-          if (!isListening && isSupported) {
-            startListening();
-          }
         }}
         className={`fixed bottom-28 right-4 z-40 flex h-16 w-16 items-center justify-center rounded-full text-white shadow-soft transition ${
           isListening
