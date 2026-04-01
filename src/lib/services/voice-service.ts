@@ -88,6 +88,8 @@ export async function handleVoiceTranscript(
   mode: VoiceCaptureMode
 ): Promise<VoiceCommandOutcome> {
   const normalizedTranscript = normalizeTranscript(transcript);
+  const refinedTranscript = refineTranscriptForTask(normalizedTranscript);
+  const parseBase = refinedTranscript || normalizedTranscript;
 
   if (!normalizedTranscript) {
     return {
@@ -98,7 +100,7 @@ export async function handleVoiceTranscript(
   }
 
   const [{ categories }, tasks] = await Promise.all([getTaskComposerData(), getAllTasks()]);
-  const parsed = parseVoiceCommand(normalizedTranscript, categories, new Date());
+  const parsed = parseVoiceCommand(parseBase, categories, new Date());
 
   if (parsed.action === "query_today") {
     const todayTasks = getVoiceTodayTasks(tasks);
@@ -117,11 +119,11 @@ export async function handleVoiceTranscript(
     const matchedTask = findTaskByVoiceName(tasks, parsed.targetTaskName);
 
     if (!matchedTask?.id) {
-      const memoId = await saveVoiceMemoRecord({
-        transcript: normalizedTranscript,
-        memoType: "task_candidate",
-        keywords: parsed.keywords
-      });
+    const memoId = await saveVoiceMemoRecord({
+      transcript: parsed.memoType === "task_candidate" ? parseBase : normalizedTranscript,
+      memoType: "task_candidate",
+      keywords: parsed.keywords
+    });
 
       return {
         kind: "saved_memo",
@@ -146,7 +148,7 @@ export async function handleVoiceTranscript(
 
   if (mode === "memo") {
     const memoId = await saveVoiceMemoRecord({
-      transcript: normalizedTranscript,
+      transcript: parsed.memoType === "task_candidate" ? parseBase : normalizedTranscript,
       memoType: parsed.memoType,
       keywords: parsed.keywords
     });
@@ -168,11 +170,11 @@ export async function handleVoiceTranscript(
 
   if (parsed.action === "create_task" && parsed.taskDraft) {
     if (mode === "auto" && parsed.confidence === "candidate") {
-      const memoId = await saveVoiceMemoRecord({
-        transcript: normalizedTranscript,
-        memoType: "task_candidate",
-        keywords: parsed.keywords
-      });
+    const memoId = await saveVoiceMemoRecord({
+      transcript: parsed.memoType === "task_candidate" ? parseBase : normalizedTranscript,
+      memoType: "task_candidate",
+      keywords: parsed.keywords
+    });
 
       return {
         kind: "saved_memo",
@@ -202,7 +204,7 @@ export async function handleVoiceTranscript(
   }
 
   const memoId = await saveVoiceMemoRecord({
-    transcript: normalizedTranscript,
+    transcript: parsed.memoType === "task_candidate" ? parseBase : normalizedTranscript,
     memoType: parsed.memoType,
     keywords: parsed.keywords
   });
@@ -246,9 +248,11 @@ export async function convertVoiceMemoToTask(memoId: number) {
     throw new Error("変換対象のボイスメモが見つかりません。");
   }
 
-  const parsed = parseVoiceCommand(memo.transcript, categories, memo.recordedAt ?? new Date());
+  const refinedTranscript = refineTranscriptForTask(memo.transcript);
+  const parseBase = refinedTranscript || memo.transcript;
+  const parsed = parseVoiceCommand(parseBase, categories, memo.recordedAt ?? new Date());
   const draft = parsed.taskDraft ?? {
-    title: memo.transcript,
+    title: parseBase,
     priority: "medium" as Priority
   };
 
@@ -262,7 +266,8 @@ export async function convertVoiceMemoToTask(memoId: number) {
 
   await db.voiceMemos.update(memoId, {
     linkedTaskId: taskId,
-    memoType: "task_candidate"
+    memoType: "task_candidate",
+    transcript: parsed.memoType === "task_candidate" ? parseBase : memo.transcript
   });
 
   return {
@@ -603,6 +608,24 @@ function mapWeekdayToNumber(weekday: string) {
 
 function normalizeTranscript(transcript: string) {
   return transcript.replace(/\s+/g, " ").trim();
+}
+
+function refineTranscriptForTask(transcript: string) {
+  if (!transcript) {
+    return transcript;
+  }
+
+  const fillers = /(えー|えっと|ええと|えーと|あのー|うーん|んー|まー|まあ|まぁ|あー|そのー)/g;
+  const cleaned = normalizeTranscript(transcript)
+    .replace(fillers, "")
+    .replace(/[「」『』]/g, "")
+    .replace(/[，,]/g, "、")
+    .replace(/[、]{2,}/g, "、")
+    .replace(/\s*、\s*/g, "、")
+    .replace(/^、+/, "")
+    .trim();
+
+  return cleaned || transcript;
 }
 
 function normalizeForMatch(text: string) {

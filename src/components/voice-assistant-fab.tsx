@@ -30,13 +30,22 @@ export function VoiceAssistantFab({
   const [recentMemos, setRecentMemos] = useState<VoiceMemoItem[]>([]);
   const [errorMessage, setErrorMessage] = useState<string>();
   const [isConvertingMemoId, setIsConvertingMemoId] = useState<number | null>(null);
+  const [autoTaskify, setAutoTaskify] = useState(true);
   const finalTranscriptRef = useRef("");
   const recognitionRef = useRef<SpeechRecognition | null>(null);
 
   useEffect(() => {
     setIsSupported(supportsSpeechRecognition());
+    const savedSetting = window.localStorage.getItem("focusflow-voice-autotaskify");
+    if (savedSetting === "off") {
+      setAutoTaskify(false);
+    }
     void refreshMemos();
   }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem("focusflow-voice-autotaskify", autoTaskify ? "on" : "off");
+  }, [autoTaskify]);
 
   async function refreshMemos() {
     const memos = await getRecentVoiceMemos(5);
@@ -54,11 +63,32 @@ export function VoiceAssistantFab({
 
     try {
       const nextResult = await handleVoiceTranscript(transcript, mode);
-      setResult(nextResult);
+      let finalResult = nextResult;
+
+      if (
+        autoTaskify &&
+        nextResult.kind === "saved_memo" &&
+        nextResult.memoType === "task_candidate" &&
+        typeof nextResult.memoId === "number"
+      ) {
+        const created = await convertVoiceMemoToTask(nextResult.memoId);
+        finalResult = {
+          kind: "created_task",
+          message: `ボイスメモから「${created.taskTitle}」をタスク化しました。`,
+          transcript,
+          taskId: created.taskId,
+          taskDraft: {
+            title: created.taskTitle,
+            priority: "medium"
+          }
+        };
+      }
+
+      setResult(finalResult);
       setIsOpen(true);
       await refreshMemos();
 
-      if (nextResult.kind === "created_task" || nextResult.kind === "completed_task") {
+      if (finalResult.kind === "created_task" || finalResult.kind === "completed_task") {
         await onTasksChanged();
       }
     } catch (error) {
@@ -205,6 +235,24 @@ export function VoiceAssistantFab({
               label={isMorningPageTime() ? "朝メモ" : "メモ"}
               onClick={() => setMode("memo")}
             />
+          </div>
+
+          <div className="mt-3 flex items-center justify-between gap-3 rounded-full border border-slate-200/70 bg-white/70 px-4 py-2 text-sm dark:border-slate-700/70 dark:bg-slate-950/30">
+            <div>
+              <p className="font-medium">タスク自動化</p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">タスク候補なら自動で作成</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setAutoTaskify((current) => !current)}
+              className={`rounded-full px-4 py-2 text-xs font-semibold transition ${
+                autoTaskify
+                  ? "bg-secondary text-white"
+                  : "border border-slate-200/80 text-slate-700 dark:border-slate-700 dark:text-slate-200"
+              }`}
+            >
+              {autoTaskify ? "オン" : "オフ"}
+            </button>
           </div>
 
           <div className="mt-4 rounded-[22px] border border-slate-200/70 bg-white/55 p-4 dark:border-slate-700/70 dark:bg-slate-950/25">
