@@ -1,14 +1,12 @@
 "use client";
 
 import type { FormEvent } from "react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   convertVoiceMemoToTask,
   getRecentVoiceMemos,
-  getSpeechRecognitionConstructor,
   handleVoiceTranscript,
   isMorningPageTime,
-  supportsSpeechRecognition,
   type VoiceCaptureMode,
   type VoiceCommandOutcome,
   type VoiceMemoItem
@@ -21,21 +19,14 @@ export function VoiceAssistantFab({
 }) {
   const [isOpen, setIsOpen] = useState(false);
   const [mode, setMode] = useState<VoiceCaptureMode>(isMorningPageTime() ? "memo" : "auto");
-  const [isSupported, setIsSupported] = useState(false);
-  const [isListening, setIsListening] = useState(false);
-  const [interimTranscript, setInterimTranscript] = useState("");
-  const [latestTranscript, setLatestTranscript] = useState("");
   const [textDraft, setTextDraft] = useState("");
   const [result, setResult] = useState<VoiceCommandOutcome | null>(null);
   const [recentMemos, setRecentMemos] = useState<VoiceMemoItem[]>([]);
   const [errorMessage, setErrorMessage] = useState<string>();
   const [isConvertingMemoId, setIsConvertingMemoId] = useState<number | null>(null);
   const [autoTaskify, setAutoTaskify] = useState(true);
-  const finalTranscriptRef = useRef("");
-  const recognitionRef = useRef<SpeechRecognition | null>(null);
 
   useEffect(() => {
-    setIsSupported(supportsSpeechRecognition());
     const savedSetting = window.localStorage.getItem("focusflow-voice-autotaskify");
     if (savedSetting === "off") {
       setAutoTaskify(false);
@@ -52,128 +43,100 @@ export function VoiceAssistantFab({
     setRecentMemos(memos);
   }
 
-  async function processTranscript(transcript: string) {
-    if (!transcript.trim()) {
+  const processTranscript = useCallback(
+    async (transcript: string) => {
+      if (!transcript.trim()) {
+        return;
+      }
+
+      setTextDraft("");
+      setErrorMessage(undefined);
+
+      try {
+        const nextResult = await handleVoiceTranscript(transcript, mode);
+        let finalResult = nextResult;
+
+        if (
+          autoTaskify &&
+          nextResult.kind === "saved_memo" &&
+          nextResult.memoType === "task_candidate" &&
+          typeof nextResult.memoId === "number"
+        ) {
+          const created = await convertVoiceMemoToTask(nextResult.memoId);
+          finalResult = {
+            kind: "created_task",
+            message: `メモから「${created.taskTitle}」をタスク化しました。`,
+            transcript,
+            taskId: created.taskId,
+            taskDraft: {
+              title: created.taskTitle,
+              priority: "medium"
+            }
+          };
+        }
+
+        setResult(finalResult);
+        setIsOpen(true);
+        await refreshMemos();
+
+        if (finalResult.kind === "created_task" || finalResult.kind === "completed_task") {
+          await onTasksChanged();
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "入力処理に失敗しました。";
+        setErrorMessage(message);
+      }
+    },
+    [autoTaskify, mode, onTasksChanged]
+  );
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const importText = params.get("import") || params.get("text");
+    if (!importText) {
       return;
     }
 
-    setLatestTranscript(transcript);
-    setTextDraft("");
-    setErrorMessage(undefined);
+    setIsOpen(true);
+    void processTranscript(importText);
 
-    try {
-      const nextResult = await handleVoiceTranscript(transcript, mode);
-      let finalResult = nextResult;
-
-      if (
-        autoTaskify &&
-        nextResult.kind === "saved_memo" &&
-        nextResult.memoType === "task_candidate" &&
-        typeof nextResult.memoId === "number"
-      ) {
-        const created = await convertVoiceMemoToTask(nextResult.memoId);
-        finalResult = {
-          kind: "created_task",
-          message: `ボイスメモから「${created.taskTitle}」をタスク化しました。`,
-          transcript,
-          taskId: created.taskId,
-          taskDraft: {
-            title: created.taskTitle,
-            priority: "medium"
-          }
-        };
-      }
-
-      setResult(finalResult);
-      setIsOpen(true);
-      await refreshMemos();
-
-      if (finalResult.kind === "created_task" || finalResult.kind === "completed_task") {
-        await onTasksChanged();
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "音声処理に失敗しました。";
-      setErrorMessage(message);
-    }
-  }
+    params.delete("import");
+    params.delete("text");
+    const nextQuery = params.toString();
+    const nextUrl = nextQuery ? `${window.location.pathname}?${nextQuery}` : window.location.pathname;
+    window.history.replaceState({}, "", nextUrl);
+  }, [processTranscript]);
 
   function handleTextSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     void processTranscript(textDraft.trim());
   }
 
-  function startListening() {
-    const Recognition = getSpeechRecognitionConstructor();
-
-    if (!Recognition) {
-      setErrorMessage("このブラウザでは音声認識が使えません。Chrome 系ブラウザでお試しください。");
-      setIsOpen(true);
+  async function handlePasteFromClipboard(runImmediately = false) {
+    if (!navigator.clipboard?.readText) {
+      setErrorMessage("このブラウザではクリップボード読み取りが使えません。");
       return;
     }
 
-    finalTranscriptRef.current = "";
-    setInterimTranscript("");
-    setLatestTranscript("");
-    setResult(null);
-    setErrorMessage(undefined);
-    setIsOpen(true);
-
-    const recognition = new Recognition();
-    recognition.lang = "ja-JP";
-    recognition.continuous = false;
-    recognition.interimResults = true;
-    recognition.maxAlternatives = 1;
-
-    recognition.onstart = () => {
-      setIsListening(true);
-    };
-
-    recognition.onresult = (event) => {
-      let nextFinal = "";
-      let nextInterim = "";
-
-      for (let index = event.resultIndex; index < event.results.length; index += 1) {
-        const resultItem = event.results[index];
-        const transcript = resultItem[0]?.transcript ?? "";
-        if (resultItem.isFinal) {
-          nextFinal += transcript;
-        } else {
-          nextInterim += transcript;
-        }
+    try {
+      const clipText = await navigator.clipboard.readText();
+      if (!clipText.trim()) {
+        setErrorMessage("クリップボードにテキストがありません。");
+        return;
       }
 
-      if (nextFinal) {
-        finalTranscriptRef.current = `${finalTranscriptRef.current} ${nextFinal}`.trim();
+      setErrorMessage(undefined);
+
+      if (runImmediately) {
+        void processTranscript(clipText);
+        return;
       }
 
-      setLatestTranscript(finalTranscriptRef.current);
-      setInterimTranscript(nextInterim.trim());
-    };
-
-    recognition.onerror = (event) => {
-      if (event.error === "not-allowed") {
-        setErrorMessage("マイク権限が必要です。ブラウザでマイクを許可してください。");
-      } else if (event.error !== "aborted") {
-        setErrorMessage(`音声認識エラー: ${event.error}`);
-      }
-    };
-
-    recognition.onend = () => {
-      setIsListening(false);
-      const transcript = finalTranscriptRef.current.trim();
-      finalTranscriptRef.current = "";
-      setInterimTranscript("");
-      if (transcript) {
-        void processTranscript(transcript);
-      }
-    };
-
-    recognitionRef.current = recognition;
-    recognition.start();
-  }
-
-  function stopListening() {
-    recognitionRef.current?.stop();
+      setTextDraft(clipText);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "クリップボードの読み取りに失敗しました。";
+      setErrorMessage(message);
+    }
   }
 
   async function handleConvertMemo(memoId: number) {
@@ -183,7 +146,7 @@ export function VoiceAssistantFab({
       const created = await convertVoiceMemoToTask(memoId);
       setResult({
         kind: "created_task",
-        message: `ボイスメモから「${created.taskTitle}」をタスク化しました。`,
+        message: `メモから「${created.taskTitle}」をタスク化しました。`,
         transcript: "",
         taskId: created.taskId,
         taskDraft: {
@@ -207,8 +170,8 @@ export function VoiceAssistantFab({
         <section className="glass-card fixed bottom-48 right-4 z-30 w-[min(92vw,24rem)] rounded-[28px] p-5 shadow-soft">
           <div className="flex items-start justify-between gap-3">
             <div>
-              <p className="text-sm font-semibold text-primary">Voice Hub</p>
-              <h2 className="mt-1 text-lg font-semibold">音声入力アシスタント</h2>
+              <p className="text-sm font-semibold text-primary">Input Hub</p>
+              <h2 className="mt-1 text-lg font-semibold">テキスト入力アシスタント</h2>
             </div>
             <button
               type="button"
@@ -257,49 +220,10 @@ export function VoiceAssistantFab({
 
           <div className="mt-4 rounded-[22px] border border-slate-200/70 bg-white/55 p-4 dark:border-slate-700/70 dark:bg-slate-950/25">
             <p className="text-xs font-medium uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
-              Speech
-            </p>
-            <p className="mt-2 text-sm leading-6 text-slate-600 dark:text-slate-300">
-              {isSupported
-                ? "音声認識はブラウザ標準の Web Speech API を使います。解析は外部 API なしのローカルルールベースです。"
-                : "このブラウザでは Web Speech API が使えません。"}
-            </p>
-
-            <div className="mt-4 flex gap-3">
-              <button
-                type="button"
-                onClick={isListening ? stopListening : startListening}
-                disabled={!isSupported}
-                className={`flex-1 rounded-2xl px-4 py-3 text-sm font-semibold text-white transition ${
-                  isListening ? "bg-danger hover:bg-red-500" : "bg-primary hover:bg-blue-700"
-                } disabled:cursor-not-allowed disabled:opacity-60`}
-              >
-                {isListening ? "録音を止める" : "録音を始める"}
-              </button>
-            </div>
-
-            <div className="mt-4 rounded-2xl bg-slate-50/80 p-4 text-sm leading-6 text-slate-700 dark:bg-slate-900/80 dark:text-slate-200">
-              <p className="font-medium">
-                {isListening ? "聞き取り中..." : result ? "最新の認識結果" : "ここに音声テキストが表示されます"}
-              </p>
-              <p className="mt-2 whitespace-pre-wrap break-words">
-                {interimTranscript || latestTranscript || "まだ音声はありません"}
-              </p>
-            </div>
-
-            {errorMessage ? (
-              <p className="mt-4 rounded-2xl border border-danger/20 bg-danger/10 px-4 py-3 text-sm text-danger">
-                {errorMessage}
-              </p>
-            ) : null}
-          </div>
-
-          <div className="mt-4 rounded-[22px] border border-slate-200/70 bg-white/55 p-4 dark:border-slate-700/70 dark:bg-slate-950/25">
-            <p className="text-xs font-medium uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
               Text
             </p>
             <p className="mt-2 text-sm leading-6 text-slate-600 dark:text-slate-300">
-              話せない場所では、ここに打ち込んでも同じローカル解析でタスク化やメモ保存ができます。
+              iOS のボイスメモ文字起こしをコピーして貼り付ければ、ここからタスク化できます。
             </p>
 
             <form className="mt-4 space-y-3" onSubmit={handleTextSubmit}>
@@ -309,14 +233,36 @@ export function VoiceAssistantFab({
                 className="soft-input min-h-24 w-full rounded-2xl px-4 py-3 text-sm outline-none"
                 placeholder="例: 明日までに体育のシラバスを作る、仕事、優先度高"
               />
+              <div className="grid gap-2 sm:grid-cols-2">
+                <button
+                  type="button"
+                  onClick={() => void handlePasteFromClipboard(false)}
+                  className="rounded-2xl border border-slate-200/80 px-4 py-3 text-sm font-semibold text-slate-700 transition hover:border-primary/40 hover:text-primary dark:border-slate-700 dark:text-slate-200"
+                >
+                  クリップボードを貼り付け
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handlePasteFromClipboard(true)}
+                  className="rounded-2xl bg-secondary px-4 py-3 text-sm font-semibold text-white transition hover:bg-emerald-600"
+                >
+                  貼り付けて実行
+                </button>
+              </div>
               <button
                 type="submit"
                 disabled={!textDraft.trim()}
-                className="w-full rounded-2xl bg-secondary px-4 py-3 text-sm font-semibold text-white transition hover:bg-emerald-600 disabled:cursor-not-allowed disabled:opacity-60"
+                className="w-full rounded-2xl border border-secondary/30 bg-secondary/10 px-4 py-3 text-sm font-semibold text-emerald-700 transition hover:bg-secondary/20 disabled:cursor-not-allowed disabled:opacity-60 dark:text-emerald-300"
               >
-                テキストを実行する
+                入力したテキストを実行
               </button>
             </form>
+
+            {errorMessage ? (
+              <p className="mt-4 rounded-2xl border border-danger/20 bg-danger/10 px-4 py-3 text-sm text-danger">
+                {errorMessage}
+              </p>
+            ) : null}
           </div>
 
           {result ? (
@@ -340,7 +286,7 @@ export function VoiceAssistantFab({
 
           <div className="mt-4">
             <div className="flex items-center justify-between gap-3">
-              <h3 className="text-sm font-semibold">最近のボイスメモ</h3>
+              <h3 className="text-sm font-semibold">最近のメモ</h3>
               {isMorningPageTime() ? (
                 <span className="rounded-full bg-accent/15 px-3 py-1 text-xs font-semibold text-amber-700 dark:text-amber-300">
                   Morning Page
@@ -389,7 +335,7 @@ export function VoiceAssistantFab({
                 ))
               ) : (
                 <p className="rounded-[22px] border border-dashed border-slate-300/80 bg-white/45 px-4 py-5 text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-950/20 dark:text-slate-300">
-                  まだボイスメモはありません。
+                  まだメモはありません。
                 </p>
               )}
             </div>
@@ -402,14 +348,10 @@ export function VoiceAssistantFab({
         onClick={() => {
           setIsOpen(true);
         }}
-        className={`fixed bottom-28 right-4 z-40 flex h-16 w-16 items-center justify-center rounded-full text-white shadow-soft transition ${
-          isListening
-            ? "bg-danger hover:bg-red-500"
-            : "bg-gradient-to-br from-primary to-secondary hover:scale-[1.02]"
-        }`}
-        aria-label="音声入力を開く"
+        className="fixed bottom-28 right-4 z-40 flex h-16 w-16 items-center justify-center rounded-full bg-gradient-to-br from-primary to-secondary text-white shadow-soft transition hover:scale-[1.02]"
+        aria-label="テキスト入力を開く"
       >
-        <span className="text-2xl">{isListening ? "■" : "🎙"}</span>
+        <span className="text-2xl">Aa</span>
       </button>
     </>
   );

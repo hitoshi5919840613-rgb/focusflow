@@ -261,7 +261,7 @@ export async function convertVoiceMemoToTask(memoId: number) {
     categoryId: draft.categoryId,
     dueDate: draft.dueDate,
     priority: draft.priority,
-    description: draft.description ?? `ボイスメモから変換: ${memo.transcript}`
+    description: draft.description ?? `メモから変換: ${memo.transcript}`
   });
 
   await db.voiceMemos.update(memoId, {
